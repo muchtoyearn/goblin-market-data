@@ -26,6 +26,8 @@ from pathlib import Path
 
 import requests
 
+import informed as inf
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
@@ -35,7 +37,7 @@ LEADERBOARD = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 OKX = "https://www.okx.com/api/v5"
 DERIBIT = "https://www.deribit.com/api/v2/public"
 
-WHALE_UNIVERSE = int(os.getenv("WHALE_UNIVERSE", "500"))  # top accounts by equity scanned
+WHALE_UNIVERSE = int(os.getenv("WHALE_UNIVERSE", "300"))  # top accounts by equity scanned
 WHALE_COUNT = int(os.getenv("WHALE_COUNT", "50"))  # largest BTC positions tracked
 WHALE_MIN_NTL = 250_000  # ignore BTC positions under $250k
 
@@ -270,14 +272,15 @@ def deribit_block():
 
 
 # ----------------------------------------------------------------- whales
-def whales_block(price: float):
-    lb = get(LEADERBOARD, timeout=90)["leaderboardRows"]
+def whales_block(price: float, lb):
+    lb = sorted(lb, key=lambda r: float(r.get("accountValue") or 0), reverse=True)
     lb.sort(key=lambda r: float(r.get("accountValue") or 0), reverse=True)
     universe = lb[:WHALE_UNIVERSE]
 
     def pos(row):
         addr = row["ethAddress"]
         try:
+            inf.LIMIT.take(2)
             st = hl({"type": "clearinghouseState", "user": addr})
         except Exception:  # noqa: BLE001
             return None
@@ -311,7 +314,30 @@ def whales_block(price: float):
         "long_usd": long_ntl,
         "short_usd": short_ntl,
         "top": [{k: (round(v, 2) if isinstance(v, float) else v) for k, v in p.items()} for p in top[:10]],
+        "_holders": [p["addr"] for p in found],
     }
+
+
+# --------------------------------------------------------- informed cohort
+def informed_block(price: float, lb, holders=()):
+    cache = load("informed_stats.json", {})
+    pool = inf.candidate_pool(lb, holders)
+    budget = int(os.getenv("INFORMED_REFRESH", str(inf.REFRESH_PER_RUN)))
+    done, stale = inf.refresh_stats(hl_raw, cache, pool, NOW_MS, budget=budget, errors=ERRORS)
+    save("informed_stats.json", cache)
+    cohort = inf.build_cohort(pool, cache)
+    prev = load("informed_positions.json", {})
+    pos = inf.positioning(hl_raw, cohort, price, prev)
+    save("informed_positions.json", pos.pop("all_szi"))
+    scored = sum(1 for c in pool if c["addr"] in cache)
+    pos.update({"pool": len(pool), "scored": scored, "refreshed_this_run": done, "stale_remaining": max(stale - done, 0),
+                "criteria": {**inf.QUAL, "min_equity": inf.MIN_EQUITY, "lookback_days": inf.LOOKBACK_D,
+                             "min_position": inf.MIN_POS_NTL}})
+    return pos
+
+
+def hl_raw(body):
+    return hl(body)
 
 
 # ------------------------------------------------------------------ macro
@@ -352,7 +378,7 @@ def macro_block():
 
 
 # --------------------------------------------------------------- signals
-def evaluate_signals(b, okx, der, wh, mac, oi_total_chg):
+def evaluate_signals(b, okx, der, inf_, mac, oi_total_chg, inf_hist_4h=None):
     """Return list of signal dicts. Each: id, name, direction, active, detail."""
     sigs = []
     fund = b.get("hl_funding_apr")
@@ -378,19 +404,30 @@ def evaluate_signals(b, okx, der, wh, mac, oi_total_chg):
                  "rule": "Avg funding negative, OI +3% in 24h, price holding (>= -0.5% 24h)",
                  "inputs": {"avg_funding_apr": r2(avg_fund), "oi_chg24h": oi_total_chg, "price_24h": px24}})
 
-    # 3. Whales vs crowd
-    wl = wh.get("long_pct_ntl") if wh else None
+    # 3. Informed traders vs crowd (hedge-adjusted, quality-filtered cohort)
+    il = inf_.get("long_pct_ntl") if inf_ else None
+    npos = inf_.get("positioned", 0) if inf_ else 0
     crowd_long = ls_p is not None and ls_p >= 60
     crowd_short = ls_p is not None and ls_p <= 40
-    if wl is not None and wl <= 40 and crowd_long:
+    enough = npos >= 8
+    if enough and il is not None and il <= 35 and crowd_long:
         d, act = "short", True
-    elif wl is not None and wl >= 60 and crowd_short:
+    elif enough and il is not None and il >= 65 and crowd_short:
         d, act = "long", True
     else:
-        d, act = ("short" if (wl or 50) < 50 else "long"), False
-    sigs.append({"id": "whale_divergence", "name": "Whales vs crowd", "direction": d, "active": act,
-                 "rule": "Tracked whales <= 40% long while crowd L/S in top 40% of range (short), or whales >= 60% long while crowd in bottom 40% (long)",
-                 "inputs": {"whale_long_pct": wl, "ls_pctile": ls_p}})
+        d, act = ("short" if (il if il is not None else 50) < 50 else "long"), False
+    sigs.append({"id": "informed_vs_crowd", "name": "Informed traders vs crowd", "direction": d, "active": act,
+                 "rule": "At least 8 informed traders positioned. Informed <= 35% long while crowd L/S in top 40% of its 30d range (short), or >= 65% long while crowd in bottom 40% (long)",
+                 "inputs": {"informed_long_pct": il, "positioned": npos, "ls_pctile": ls_p}})
+
+    # 3b. Informed flow shift over 4h
+    il4 = inf_hist_4h
+    shift = (il - il4) if (il is not None and il4 is not None) else None
+    act = enough and shift is not None and abs(shift) >= 15
+    sigs.append({"id": "informed_shift", "name": "Informed flow shift", "direction": "long" if (shift or 0) >= 0 else "short",
+                 "active": bool(act),
+                 "rule": "Informed traders' long share moved 15+ points in 4h (at least 8 positioned)",
+                 "inputs": {"informed_long_pct": il, "four_h_ago": il4, "shift_pts": r2(shift, 1) if shift is not None else None}})
 
     # 4. Macro tailwind / headwind
     v, dx, ty = (mac.get(k, {}).get("chg_pct") for k in ("VIX", "DXY", "US10Y"))
@@ -473,7 +510,10 @@ def main():
     btc = btc_block()  # hard requirement
     okx = safe("okx", okx_block, {})
     der = safe("deribit", deribit_block, {})
-    wh = safe("whales", lambda: whales_block(btc["price"]), {})
+    lb = safe("leaderboard", lambda: get(LEADERBOARD, timeout=90)["leaderboardRows"], [])
+    wh = safe("whales", lambda: whales_block(btc["price"], lb), {}) if lb else {}
+    holders = wh.pop("_holders", []) if isinstance(wh, dict) else []
+    infd = safe("informed", lambda: informed_block(btc["price"], lb, holders), {}) if lb else {}
     mac = safe("macro", macro_block, {})
 
     # combined OI across Hyperliquid + OKX (all BTC contracts) + Deribit perp
@@ -484,12 +524,12 @@ def main():
     rows = [r for r in hist["rows"] if NOW_MS - r["t"] <= 80 * 3600 * 1000]
     rows.append({"t": NOW_MS, "px": btc["price"], "hl_oi": btc["hl_oi_usd"], "oi_total": oi_total,
                  "ls": okx.get("ls_ratio"), "fund": btc["hl_funding_apr"],
-                 "whale_long": wh.get("long_pct_ntl")})
+                 "whale_long": wh.get("long_pct_ntl"), "inf_long": infd.get("long_pct_ntl")})
     save("history.json", {"rows": rows})
 
     def ago(key, hours):
         tgt = NOW_MS - hours * 3600 * 1000
-        older = [r for r in rows if r["t"] <= tgt + 15 * 60 * 1000 and r.get(key)]
+        older = [r for r in rows if r["t"] <= tgt + 15 * 60 * 1000 and r.get(key) is not None]
         return older[-1][key] if older and NOW_MS - older[-1]["t"] >= (hours - 1) * 3600 * 1000 else None
 
     hl_oi_24 = ago("hl_oi", 24)
@@ -499,7 +539,7 @@ def main():
     oi_total_chg = r2(pct(oi_total, tot_24)) if tot_24 else okx.get("oi_all_chg24h")
     oi_chg_source = "history" if tot_24 else "okx_proxy"
 
-    sigs = evaluate_signals(btc, okx, der, wh, mac, oi_total_chg)
+    sigs = evaluate_signals(btc, okx, der, infd, mac, oi_total_chg, ago("inf_long", 4))
     prev = load("snapshot.json", {})
     prev_active = {s["id"] for s in prev.get("signals", []) if s.get("active")}
     log = update_signal_log(sigs, btc["price"], prev_active)
@@ -519,6 +559,7 @@ def main():
         "okx": okx,
         "deribit": der,
         "whales": wh,
+        "informed": infd,
         "macro": mac,
         "signals": sigs,
         "signal_stats": log.get("stats", {}),
