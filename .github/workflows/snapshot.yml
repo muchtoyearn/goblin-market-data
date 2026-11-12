@@ -30,12 +30,13 @@ jobs:
           end=$(( $(date +%s) + 340*60 ))
           while [ "$(date +%s)" -lt "$end" ]; do
             start=$(date +%s)
-            git pull --rebase -q || true
+            git rebase --abort 2>/dev/null || true
+            git fetch -q origin main && git reset -q --hard origin/main
             python collector/snapshot.py || echo "collector run failed"
             git add data/
             if ! git diff --cached --quiet; then
               git commit -m "data: snapshot $(date -u +%FT%TZ)" -q
-              for i in 1 2 3; do git pull --rebase -q && git push -q && break; sleep 5; done
+              for i in 1 2 3; do git pull --rebase -q -X theirs && git push -q && break; git rebase --abort 2>/dev/null || true; sleep 5; done
             fi
             elapsed=$(( $(date +%s) - start ))
             sleep $(( elapsed < 600 ? 600 - elapsed : 5 ))
