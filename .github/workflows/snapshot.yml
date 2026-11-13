@@ -33,6 +33,7 @@ jobs:
             git rebase --abort 2>/dev/null || true
             git fetch -q origin main && git reset -q --hard origin/main
             python collector/snapshot.py || echo "collector run failed"
+            timeout 600 python collector/tabs.py || echo "tabs failed"
             git add data/
             if ! git diff --cached --quiet; then
               git commit -m "data: snapshot $(date -u +%FT%TZ)" -q
