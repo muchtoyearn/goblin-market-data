@@ -34,6 +34,7 @@ jobs:
             git fetch -q origin main && git reset -q --hard origin/main
             python collector/snapshot.py || echo "collector run failed"
             timeout 600 python collector/tabs.py || echo "tabs failed"
+            timeout 420 python collector/spotflow.py || echo "spotflow failed"
             git add data/
             if ! git diff --cached --quiet; then
               git commit -m "data: snapshot $(date -u +%FT%TZ)" -q
