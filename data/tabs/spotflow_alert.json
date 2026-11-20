@@ -1,8 +1,20 @@
 {
- "confirmed_label": "Leaning bearish",
- "confirmed_at": "2026-11-20T16:08:25.971583+00:00",
- "pending_label": "Bearish flow",
- "pending_runs": 1,
- "last_alert": {},
- "history": []
+ "confirmed_label": "Bearish flow",
+ "confirmed_at": "2026-11-20T18:07:19.699129+00:00",
+ "pending_label": null,
+ "pending_runs": 0,
+ "last_alert": {
+  "Bearish flow": "2026-11-20T18:07:19.699129+00:00"
+ },
+ "history": [
+  {
+   "t": "2026-11-20T18:07:19.699129+00:00",
+   "from": "Leaning bearish",
+   "to": "Bearish flow",
+   "score": -2.0,
+   "btc": 58934.67,
+   "action": "alert",
+   "mode": "paper"
+  }
+ ]
 }
