@@ -24,6 +24,8 @@ jobs:
           cache: pip
       - run: pip install -r collector/requirements.txt
       - name: Collect every 10 minutes
+        env:
+          DISCORD_SPOTFLOW_WEBHOOK: ${{ secrets.DISCORD_SPOTFLOW_WEBHOOK }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -35,6 +37,7 @@ jobs:
             python collector/snapshot.py || echo "collector run failed"
             timeout 600 python collector/tabs.py || echo "tabs failed"
             timeout 420 python collector/spotflow.py || echo "spotflow failed"
+            timeout 60 python collector/spotflow_alert.py || echo "spotflow alert failed"
             git add data/
             if ! git diff --cached --quiet; then
               git commit -m "data: snapshot $(date -u +%FT%TZ)" -q
