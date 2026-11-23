@@ -1,0 +1,319 @@
+{
+  "generated": "2026-11-23T17:41:26Z",
+  "method": [
+    "Research only: no HIGH or MEDIUM signal is activated from this backtest; WATCH is not a copy-trade recommendation.",
+    "Observe standard fills only. A separate TWAP feed, other wallets/accounts, and off-exchange or spot hedges are not measured.",
+    "The sample is a deterministic hash of today\u2019s \u2265$250,000 leaderboard wallets. Today\u2019s equity controls the historical order threshold, not historical equity.",
+    "Counts include covered misses; a hit means a same-direction, volatility-scaled 24-hour move window started within the next 48 hours.",
+    "Opening order size aggregates one order for at most one second; this does not cover slow accumulations or flips.",
+    "Gross returns are unlevered directional price changes, not realized wallet or copier PnL."
+  ],
+  "wallets": [
+    {
+      "address": "0xaa44894f7c04c77fcf2807576834b93f6a8cb844",
+      "tier": "WATCH",
+      "cohort": "repeat_premove",
+      "score": 39,
+      "labels": [
+        "Multiple full-sample hits; descriptive only",
+        "Hit BTC 2026-11-19",
+        "Hit xyz:NVDA 2026-11-12",
+        "Hit xyz:SILVER 2026-11-03"
+      ],
+      "why": [
+        "4 hits on 36 scored regular-fill starts",
+        "Observed sample coverage: 90.0 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 1773698.23921,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 52,
+        "win_rate": 0.7307692307692307,
+        "profit_factor": 1.6691589733160275,
+        "pnl_90d": null,
+        "pnl_month": -52597.399699,
+        "maker_share": 0.8779141104294479,
+        "orders_per_covered_day": 2.3,
+        "turnover_per_covered_day": 820478.3251401955,
+        "offset_overlap": false,
+        "coverage_days": 90.0
+      },
+      "premove": {
+        "hits": 4,
+        "opens_scored": 36,
+        "hit_rate": 0.1111111111111111,
+        "avg_fwd_24h": 0.11664462309456544
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x59629e23c52a0d7c092436870ef2db1dc382ddf8",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 17,
+      "labels": [
+        "Multiple full-sample hits; descriptive only",
+        "Hit ZEC 2026-11-10"
+      ],
+      "why": [
+        "2 hits on 27 scored regular-fill starts",
+        "Observed sample coverage: 70.1 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 2110211.792414,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 39,
+        "win_rate": 0.5641025641025641,
+        "profit_factor": 2.9078324392294927,
+        "pnl_90d": null,
+        "pnl_month": 620086.765967,
+        "maker_share": 0.8254127063531765,
+        "orders_per_covered_day": 10.380335573300496,
+        "turnover_per_covered_day": 2634593.396613097,
+        "offset_overlap": false,
+        "coverage_days": 70.133
+      },
+      "premove": {
+        "hits": 2,
+        "opens_scored": 27,
+        "hit_rate": 0.07407407407407407,
+        "avg_fwd_24h": 2.1981982372703013
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x6faf4312b8b5bb032f76dffe100c52c810f056a0",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit SOL 2026-09-17"
+      ],
+      "why": [
+        "1 hits on 23 scored regular-fill starts",
+        "Observed sample coverage: 90.0 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 1449715.844396,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 47,
+        "win_rate": 0.19148936170212766,
+        "profit_factor": 0.8315182905281182,
+        "pnl_90d": null,
+        "pnl_month": 799495.206978,
+        "maker_share": 0.389948006932409,
+        "orders_per_covered_day": 3.988888888888889,
+        "turnover_per_covered_day": 1664387.6219357762,
+        "offset_overlap": false,
+        "coverage_days": 90.0
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 23,
+        "hit_rate": 0.043478260869565216,
+        "avg_fwd_24h": 1.629397265576664
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x0620b7cdc799f1e7f04cc4cc80243e38498d6846",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit PUMP 2026-09-28"
+      ],
+      "why": [
+        "1 hits on 1 scored regular-fill starts",
+        "Observed sample coverage: 90.0 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 819314.82472,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 69,
+        "win_rate": 0.2753623188405797,
+        "profit_factor": 0.30759106632864186,
+        "pnl_90d": null,
+        "pnl_month": 125147.218059,
+        "maker_share": 0.6283185840707964,
+        "orders_per_covered_day": 8.988888888888889,
+        "turnover_per_covered_day": 267478.40299383603,
+        "offset_overlap": false,
+        "coverage_days": 90.0
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 1,
+        "hit_rate": 1.0,
+        "avg_fwd_24h": 6.020816674588092
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x7cb42a9fd91d7f2b506de9205254e41bede28439",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit ETH 2026-11-04"
+      ],
+      "why": [
+        "1 hits on 11 scored regular-fill starts",
+        "Observed sample coverage: 52.5 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 794979.800234,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 169,
+        "win_rate": 0.3727810650887574,
+        "profit_factor": 1.0575996738924753,
+        "pnl_90d": null,
+        "pnl_month": 131188.705241,
+        "maker_share": 0.8124062031015508,
+        "orders_per_covered_day": 9.938664855826158,
+        "turnover_per_covered_day": 1227751.7573014097,
+        "offset_overlap": false,
+        "coverage_days": 52.522
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 11,
+        "hit_rate": 0.09090909090909091,
+        "avg_fwd_24h": 0.569123710113507
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0xf9faba57a81d1575d3e506dd3eafe7db6f2a3275",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit xyz:SNDK 2026-11-10"
+      ],
+      "why": [
+        "1 hits on 6 scored regular-fill starts",
+        "Observed sample coverage: 18.2 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 724492.3392,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 41,
+        "win_rate": 0.34146341463414637,
+        "profit_factor": 0.8606493449698494,
+        "pnl_90d": null,
+        "pnl_month": -286869.979831,
+        "maker_share": 0.7943971985992997,
+        "orders_per_covered_day": 25.14769473239299,
+        "turnover_per_covered_day": 3884786.547769833,
+        "offset_overlap": false,
+        "coverage_days": 18.173
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 6,
+        "hit_rate": 0.16666666666666666,
+        "avg_fwd_24h": -0.29530100961019395
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x3e4e71d7a08d585e1b5bf885ddbecd8ff6ea15e0",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit NEAR 2026-11-20"
+      ],
+      "why": [
+        "1 hits on 11 scored regular-fill starts",
+        "Observed sample coverage: 68.6 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 298778.153581,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 112,
+        "win_rate": 0.39285714285714285,
+        "profit_factor": 0.6691857545116512,
+        "pnl_90d": null,
+        "pnl_month": -75104.631587,
+        "maker_share": 0.8513513513513513,
+        "orders_per_covered_day": 4.836598310372197,
+        "turnover_per_covered_day": 592342.7553263219,
+        "offset_overlap": false,
+        "coverage_days": 68.643
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 11,
+        "hit_rate": 0.09090909090909091,
+        "avg_fwd_24h": -2.709768870541289
+      },
+      "positions": [],
+      "last_action": null
+    },
+    {
+      "address": "0x456ce64b4ec0643fa0b02312b32b9bd364f175c2",
+      "tier": "WATCH",
+      "cohort": "one_hit",
+      "score": 11,
+      "labels": [
+        "One observed pre-move hit",
+        "Hit SOL 2026-11-22"
+      ],
+      "why": [
+        "1 hits on 1 scored regular-fill starts",
+        "Observed sample coverage: 90.0 days; snapshot equity proxy.",
+        "Not validated for persistence; hedge and TWAP coverage incomplete."
+      ],
+      "equity": 253774.649164,
+      "age_days": null,
+      "funded_by": null,
+      "stats": {
+        "closes": 3,
+        "win_rate": 1.0,
+        "profit_factor": null,
+        "pnl_90d": null,
+        "pnl_month": 36022.146313,
+        "maker_share": 0.8714285714285714,
+        "orders_per_covered_day": 0.15555555555555556,
+        "turnover_per_covered_day": 58054.28859100164,
+        "offset_overlap": false,
+        "coverage_days": 90.0
+      },
+      "premove": {
+        "hits": 1,
+        "opens_scored": 1,
+        "hit_rate": 1.0,
+        "avg_fwd_24h": 1.281384836112509
+      },
+      "positions": [],
+      "last_action": null
+    }
+  ]
+}
