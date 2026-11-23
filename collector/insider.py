@@ -230,33 +230,65 @@ def fills_merged(addr, start_ms, end_ms=None, pages=1):
     return uniq, truncated
 
 
+BRIDGE_SENDERS = {"0x2222222222222222222222222222222222222222",   # HyperEVM native bridge (HYPE)
+                  "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24"}   # CCTP bridge
+STABLES = (None, "", "USDC", "USDT0", "USDH")
+
+
+def _usd_value(d):
+    """USD value of a ledger delta; token quantities are never read as dollars. None if unknown."""
+    for k in ("usdcValue", "usdc"):
+        if d.get(k) is not None:
+            try:
+                return abs(float(d[k]))
+            except (TypeError, ValueError):
+                pass
+    if d.get("amount") is not None and (d.get("token") or "").split(":")[0] in STABLES:
+        try:
+            return abs(float(d["amount"]))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def ledger_info(addr):
+    """Account age and first funder. Spam (spotGenesis, airdrops/transfers < $100 USD value) is ignored for both."""
     addr = addr.lower()
     rows = hl({"type": "userNonFundingLedgerUpdates", "user": addr, "startTime": 0}, per=20)
     if not rows:
         return {"age_days": None, "funded_by": "unknown", "first_ts": None}
     rows.sort(key=lambda x: x["time"])
-    first = rows[0]["time"]
-    funded = "unknown"
+    first, funded = None, "unknown"
     for x in rows:
         d = x.get("delta") or {}
         t = d.get("type")
+        if t == "spotGenesis":
+            continue
+        usd = _usd_value(d)
+        incoming = (d.get("destination") or "").lower() == addr
         if t == "deposit":
-            funded = "bridge"
-            break
-        amt = next((d[k] for k in ("usdc", "amount", "usdcValue") if d.get(k) is not None), None)
-        try:
-            if amt is not None and abs(float(amt)) < CFG["fund_dust_usd"]:
-                continue  # dust sends cannot set funded_by
-        except (TypeError, ValueError):
-            pass
-        if t in ("send", "spotTransfer", "internalTransfer", "subAccountTransfer") and (d.get("destination") or "").lower() == addr:
+            if (usd or 0) >= CFG["fund_dust_usd"] or usd is None:
+                first = first or x["time"]
+                funded = "bridge"
+                break
+            continue
+        if t in ("send", "spotTransfer", "internalTransfer", "subAccountTransfer") and incoming:
+            if usd is None or usd < CFG["fund_dust_usd"]:
+                continue  # spam/dust (or unpriced token) cannot set age or funder
+            first = first or x["time"]
             src = (d.get("user") or "").lower()
+            if src in BRIDGE_SENDERS or src.startswith("0x20000000000000000000000000000000000"):
+                funded = "bridge"
+                break
             if src and src != addr:
                 funded = src
                 break
+            continue
+        if not incoming and (usd or 0) >= CFG["fund_dust_usd"]:
+            first = first or x["time"]  # e.g. an outgoing withdrawal proves the account was live
+    first = first or rows[0]["time"]
     return {"age_days": round((NOW_MS - first) / 86_400_000, 1), "funded_by": funded, "first_ts": iso(first),
-            "ledger_truncated": len(rows) >= 2000}
+            "ledger_truncated": len(rows) >= 2000, "ledger_v": 2}
 
 
 def equity_of(addr, dex_avs):
@@ -532,7 +564,9 @@ def monitor(reg, positions, dexs, marks, state, phase, min_left):
     tracked = [w for w in tracked if is_a(w) == (phase == "A")]
     # rotate: least recently polled first, so wallets skipped for time go first next cycle
     last = lambda w: (positions.get(w["address"], {}).get("") or {}).get("ts", 0)  # noqa: E731
-    tracked.sort(key=last)
+    live_ev = {k for k, e in state["events"].items() if NOW_MS - (e.get("detect_ms") or e.get("start_ms") or 0) < 72 * H}
+    hot = lambda w: any(h["event_id"] in live_ev and not h.get("chaser") for h in w["event_hits"])  # noqa: E731
+    tracked.sort(key=lambda w: (not hot(w), last(w)))  # recent-event openers every cycle, then least recently polled
     cyc = state.get("cycle", 0)
     actions = []
     new_sweeps = 0
@@ -568,9 +602,10 @@ def monitor(reg, positions, dexs, marks, state, phase, min_left):
         allpos = [dict(coin=c, **p) for d, v in merged.items() for c, p in v["pos"].items()]
         w["positions"] = sorted([{"coin": p["coin"], "side": core.side_of(p["szi"]),
                                   "notional": round(abs(p["szi"]) * marks.get(p["coin"], {}).get("mark", p["entry"])),
-                                  "entry": p["entry"], "upnl": round(p["upnl"]), "lev": p["lev"],
+                                  "entry": p["entry"], "upnl": round(p["upnl"]), "lev": p["lev"], "size": abs(p["szi"]),
                                   "opened_ts": (w.get("open_ts") or {}).get(p["coin"])} for p in allpos],
                                 key=lambda p: -p["notional"])[:12]
+        w["dex_ts"] = {d: v.get("ts") for d, v in merged.items()}
         w["hedge"] = core.is_hedged([{"coin": p["coin"], "szi": p["szi"], "ntl": abs(p["szi"]) * marks.get(p["coin"], {}).get("mark", p["entry"])}
                                      for p in allpos])
         if full and "" in cur:
@@ -836,9 +871,9 @@ def enrich(reg, lb, state):
                 w["pnl_month"] = lb["month"].get(a)
             elif w.get("equity_live"):
                 w["equity"] = w["equity_live"]
-            if not w.get("ledger_ms"):
+            if not w.get("ledger_ms") or w.get("ledger_v") != 2:
                 li = ledger_info(a)
-                w.update({k: li[k] for k in ("age_days", "funded_by")})
+                w.update({k: li.get(k) for k in ("age_days", "funded_by", "ledger_v")})
                 w["first_ts"] = li["first_ts"]
                 w["ledger_ms"] = NOW_MS
                 done += 1
@@ -1129,12 +1164,36 @@ METHOD = [
 ]
 
 
+def sync_opener(o, w, e, marks):
+    """Keep event cards live from the latest position poll (no extra API calls)."""
+    o = dict(o)
+    if not o.get("still_open") or o.get("chaser") is None:
+        return o
+    coin = e["coin"]
+    want = "long" if e["dir"] == "up" else "short"
+    dex = core.dex_of(coin)
+    ts = (w.get("dex_ts") or {}).get(dex)
+    if not ts or NOW_MS - ts > 30 * 60000:
+        return o
+    p = next((p for p in w.get("positions", []) if p["coin"] == coin and p["side"] == want), None)
+    if p:
+        if p.get("size") is not None:
+            o["size"] = round(p["size"], 4)
+        o["notional"], o["upnl"] = p["notional"], p["upnl"]
+        if o.get("equity"):
+            o["pct_equity"] = round(p["notional"] / o["equity"] * 100, 1)
+    elif len(w.get("positions", [])) < 12:  # list is capped at 12; only trust absence when it is complete
+        o["still_open"], o["upnl"], o["closed_after_check"] = False, None, True
+    return o
+
+
 def build_tab(state, reg, tape_status, dexs, marks, poll_degraded, n_tested):
     evs = []
     for e in sorted(state["events"].values(), key=lambda e: -(e.get("start_ms") or 0)):
         ops = []
         for o in e.get("openers", []):
             w = reg.get(o["address"].lower(), {})
+            o = sync_opener(o, w, e, marks)
             ops.append({**{k: o.get(k) for k in ("address", "opened_ts", "first_px", "lead_h", "size", "notional", "upnl", "realized",
                                                  "still_open", "equity", "pct_equity", "pre_open_move_pct", "chaser", "via_twap")},
                         "tier": w.get("tier"), "cohort": w.get("cohort"), "labels": w.get("labels", [])[:6],

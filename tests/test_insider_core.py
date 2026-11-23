@@ -294,3 +294,18 @@ def test_post_event_capped_and_discovery_hit_excluded():
     assert prem["independent_hits"] == 2
     tier, cohort, _ = core.assign_tier(w, prem)
     assert tier == "WATCH"
+
+
+def test_ledger_ignores_spam_and_reads_usd_value(monkeypatch):
+    import insider
+    me = "0xdcb45a8992c3cea077c3d631ee92572f64778858"
+    rows = [{"time": 1000, "delta": {"type": "spotGenesis", "token": "MAX", "amount": "5"}},
+            {"time": 2000, "delta": {"type": "spotTransfer", "token": "MAX", "amount": "1482258999", "usdcValue": "0.0",
+                                     "user": "0x207700bd00000000000000000000000000e06a", "destination": me}},
+            {"time": 3000, "delta": {"type": "spotTransfer", "token": "HYPE", "amount": "148225.9", "usdcValue": "10509216.31",
+                                     "user": "0x2222222222222222222222222222222222222222", "destination": me}}]
+    monkeypatch.setattr(insider, "hl", lambda *a, **k: rows)
+    li = insider.ledger_info(me.upper().replace("0X", "0x"))
+    assert li["funded_by"] == "bridge" and li["first_ts"] == insider.iso(3000)
+    rows[2]["delta"].update({"token": "UBTC", "amount": "8.18", "usdcValue": "911879.65", "user": "0x574bafce69d9411f662a433896e74e4f153096fa"})
+    assert insider.ledger_info(me)["funded_by"] == "0x574bafce69d9411f662a433896e74e4f153096fa"
