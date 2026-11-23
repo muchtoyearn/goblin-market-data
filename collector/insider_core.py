@@ -86,7 +86,8 @@ COHORTS = {
     "proven_speculator": ("Proven speculator", "Profitable 90-day record after fees (20+ closes, win rate 55%+, profit factor 1.3+), "
                           "holds positions long enough to copy. No proof of advance knowledge."),
     "fresh_whale": ("Fresh concentrated", "Account under 14 days old with one concentrated position of $1M+. An anomaly worth watching, unproven."),
-    "one_hit": ("Unproven: one hit", "Found after the fact as a pre-move opener. One hit is not evidence of skill or information."),
+    "one_hit": ("Unproven: found after the fact", "Found after the fact as a pre-move opener, live or in the backtest. "
+                "A hit found by looking back is not evidence of skill or information."),
     "hedger_mm": ("Hedger / market maker", "Mostly maker fills, very frequent orders, very short holds, or the position is offset elsewhere. Not a directional signal."),
     "unproven": ("Unproven", "In the registry but no qualifying evidence yet (e.g. a fresh account that aged, or a speculator whose stats lapsed)."),
 }
@@ -212,7 +213,7 @@ def is_chaser(opened_ms, start_ms, pre_move_pct, move_pct, cfg=CFG):
 
 
 # ------------------------------------------------------- opens and fills
-def first_open_fill(fills, coin, side, t_lo, t_hi):
+def first_open_fill(fills, coin, side, t_lo, t_hi, last=False):
     """Earliest fill in coin that opens from flat (startPosition == 0) in `side` within [t_lo, t_hi].
 
     fills: merged ordinary + TWAP fills (dicts with coin, time, px, sz, side, startPosition, dir).
@@ -224,14 +225,24 @@ def first_open_fill(fills, coin, side, t_lo, t_hi):
     if not cand:
         return None
     cand.sort(key=lambda f: (f["time"], abs(float(f.get("startPosition") or 0))))
+    if last:  # the latest open from flat (earlier round trips in the same hour are not the open)
+        return max(cand, key=lambda f: f["time"])
     return cand[0]
 
 
-def open_from_funding(entries, coin, side, t_lo, t_hi, q_start):
+def open_from_funding(entries, coin, side, t_lo, t_hi, q_start, ref_ms=None):
     """Locate an open from hourly funding rows (which carry szi).
 
+    Rows are grouped into runs of consecutive held hours. A run starts fresh when the hour before had no
+    position (a flip is not an open from flat). With ref_ms (the move start) the run picked is:
+      1. the run held at ref_ms (the position actually carried into the move), else
+      2. the largest run opened and closed inside [t_lo, ref_ms], else
+      3. the earliest run opened in [t_lo, t_hi] (an open after the start: a chaser).
+    Earlier small round trips are therefore never reported as "the" open.
+    Without ref_ms the earliest fresh run in [t_lo, t_hi] is returned.
+
     Returns (status, open_hour_ms, max_abs_szi):
-      status "opened"      first held at open_hour_ms (open happened in the hour before), no row the hour before
+      status "opened"      first held at open_hour_ms (open happened in the hour before)
       status "held_before" position already held at the start of the queried range (not a fresh open)
       status "none"        no position in `side` within the window
     """
@@ -239,29 +250,41 @@ def open_from_funding(entries, coin, side, t_lo, t_hi, q_start):
     rows = sorted([e for e in entries if e.get("coin") == coin], key=lambda e: e["time"])
     if not rows:
         return "none", None, 0.0
-    hours = {e["time"] // H: float(e["szi"]) for e in rows}
-    best = None
+    runs, cur = [], None
     for e in rows:
-        h = e["time"] // H
         sz = float(e["szi"])
-        if sgn(sz) != want:
+        s = sgn(sz)
+        gap_ok = cur and e["time"] - cur["end"] <= H + 10 * 60000  # funding rows land a few ms/s after the hour
+        if gap_ok and s == cur["s"]:
+            cur["end"], cur["mx"] = e["time"], max(cur["mx"], abs(sz))
             continue
-        prev = hours.get(h - 1)
-        if prev is not None and sgn(prev) == -want:
-            continue  # a flip is not an open from flat
-        fresh = prev is None or prev == 0
-        if not fresh:
-            continue
-        if e["time"] - H < q_start + H:  # held at the very start of the query: pre-dates the window
-            best = best or ("held_before", e["time"])
-            continue
-        if t_lo <= e["time"] - H and e["time"] - H <= t_hi:
-            best = ("opened", e["time"])
-            break
-    if not best:
+        flip = bool(gap_ok) and s == -cur["s"]
+        cur = {"s": s, "open": e["time"], "end": e["time"], "mx": abs(sz), "flip": flip} if s else None
+        if cur:
+            runs.append(cur)
+    mine = [r for r in runs if r["s"] == want and not r["flip"]]
+    held = [r for r in mine if r["open"] - H < q_start + H]
+    fresh = [r for r in mine if r not in held and t_lo <= r["open"] - H <= t_hi]
+
+    def covers(r):
+        return r["open"] - H <= ref_ms <= r["end"]
+
+    pick = None
+    if ref_ms is not None:
+        if any(covers(r) for r in held):
+            r = next(r for r in held if covers(r))
+            return "held_before", r["open"], r["mx"]
+        pick = next((r for r in fresh if covers(r)), None)
+        if pick is None:
+            done = [r for r in fresh if r["end"] < ref_ms]
+            pick = max(done, key=lambda r: r["mx"]) if done else None
+    if pick is None and fresh:
+        pick = fresh[0]
+    if pick is None:
+        if held:
+            return "held_before", held[0]["open"], held[0]["mx"]
         return "none", None, 0.0
-    mx = max((abs(float(e["szi"])) for e in rows if e["time"] >= best[1] and sgn(float(e["szi"])) == want), default=0.0)
-    return best[0], best[1], mx
+    return "opened", pick["open"], pick["mx"]
 
 
 def lifecycles(fills, build_h=CFG["open_build_h"]):

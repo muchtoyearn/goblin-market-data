@@ -257,7 +257,7 @@ def test_seed_registry_stays_watch(tmp_path, monkeypatch):
     w["tier"], w["cohort"], w["why"] = core.assign_tier(w, prem)
     w["labels"] = insider.labels_for(w, prem, state["events"])
     insider.seed_cap(w)
-    assert w["tier"] == "WATCH" and w["cohort"] == "repeat_premove"
+    assert w["tier"] == "WATCH" and w["cohort"] == "one_hit"  # backtest-only: never repeat_premove
     assert "Hit BTC 2026-11-19" in w["labels"] and w["why"][0].startswith("Backtest: 4 pre-move hits")
 
 
@@ -309,3 +309,21 @@ def test_ledger_ignores_spam_and_reads_usd_value(monkeypatch):
     assert li["funded_by"] == "bridge" and li["first_ts"] == insider.iso(3000)
     rows[2]["delta"].update({"token": "UBTC", "amount": "8.18", "usdcValue": "911879.65", "user": "0x574bafce69d9411f662a433896e74e4f153096fa"})
     assert insider.ledger_info(me)["funded_by"] == "0x574bafce69d9411f662a433896e74e4f153096fa"
+
+
+def test_open_is_the_position_carried_into_the_move():
+    """0xdcb4 on xyz:NVDA: small round trip 22:57-01:09, re-opened from flat 02:58, held into the 13:55 move."""
+    H = core.H
+    t = lambda h: 1795392000000 + h * H + (33 * h) % 97  # 2026-11-22T22:00Z, real rows land ms after the hour  # noqa: E731
+    rows = [{"coin": "xyz:NVDA", "time": t(h), "szi": "150"} for h in (1, 2, 3)]           # 23:00, 00:00, 01:00
+    rows += [{"coin": "xyz:NVDA", "time": t(h), "szi": "9078.57"} for h in range(5, 18)]  # 03:00 .. 15:00
+    start = t(15) + 55 * 60000                                                              # 13:55Z
+    st, oh, mx = core.open_from_funding(rows, "xyz:NVDA", "long", start - 48 * H, start + 3 * H, start - 50 * H, ref_ms=start)
+    assert st == "opened" and oh == t(5) and mx == 9078.57, (st, oh, mx)
+    fills = [{"coin": "xyz:NVDA", "time": t(4) + 58 * 60000 + 45000, "px": "132.097", "side": "B", "startPosition": "0.0"}]
+    f = core.first_open_fill(fills, "xyz:NVDA", "long", oh - H - 300000, oh + 300000, last=True)
+    assert f["px"] == "132.097" and round((start - f["time"]) / H, 1) == 10.9
+    # closed before the move: the largest round trip inside the window is picked
+    rows2 = rows[:3] + [{"coin": "xyz:NVDA", "time": t(h), "szi": "900"} for h in (6, 7)]
+    st, oh, mx = core.open_from_funding(rows2, "xyz:NVDA", "long", start - 48 * H, start + 3 * H, start - 50 * H, ref_ms=start)
+    assert oh == t(6) and mx == 900

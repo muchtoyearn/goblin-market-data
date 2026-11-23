@@ -48,7 +48,7 @@ TAPE_LIVE = Path(os.environ.get("INSIDER_TAPE_DIR", "/tmp/goblin_tape"))
 OUT = DATA / "tabs" / "insider.json"
 HLURL = "https://api.hyperliquid.xyz/info"
 LEADERBOARD = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
-BUDGET_S = float(os.environ.get("INSIDER_BUDGET_S", "230"))
+BUDGET_S = float(os.environ.get("INSIDER_BUDGET_S", "200"))  # hard stop: API calls refuse to start after this
 LIMIT = Limiter(per_min=int(os.environ.get("INSIDER_WEIGHT_PER_MIN", "400")))
 # Wallets known (from the 2026-11-23 X post / NVDA analyst) to check first for events on these underlyings.
 PRIORITY_CANDIDATES = {"NVDA": ["0x65a093e4f2ee1063ea9d97f4bc30453b3dce23af", "0xdcb45a8992c3cea077c3d631ee92572f64778858",
@@ -93,8 +93,14 @@ def save(p: Path, obj, indent=None):
     os.replace(tmp, p)
 
 
+class BudgetOut(Exception):
+    pass
+
+
 def hl(body, base=20, per=None, retries=3):
     """POST /info with central weight accounting. per = items per extra weight unit (20 for fills, 60 candles)."""
+    if left() <= 0:
+        raise BudgetOut("time budget used up")
     LIMIT.take(base)
     STATS["weight"] += base
     STATS["calls"] += 1
@@ -525,6 +531,9 @@ def _ms(s):
 
 
 def _add_event_hit(w, eid, coin, d, start_ms, opened_ms, chaser):
+    for h in w["event_hits"]:
+        if h["event_id"] == eid and opened_ms:
+            h["opened_ms"], h["chaser"] = opened_ms, chaser  # re-attribution corrects the open time
     if not any(h["event_id"] == eid for h in w["event_hits"]):
         w["event_hits"].append({"event_id": eid, "coin": coin, "dir": d, "start_ms": start_ms, "opened_ms": opened_ms,
                                 "chaser": chaser})
@@ -591,6 +600,8 @@ def monitor(reg, positions, dexs, marks, state, phase, min_left):
                 STATS["poll_ok"] += 1
                 if dex and cur[dex]["pos"] and dex not in w["known_dexs"]:
                     w["known_dexs"].append(dex)
+            except BudgetOut:
+                break  # not a poll failure: this wallet's other dexs carry forward
             except Exception as e:  # noqa: BLE001
                 STATS["poll_err"] += 1
                 err(f"poll {a[:8]} {dex or 'main'}", e)
@@ -714,6 +725,11 @@ def attribute(eid, state, reg, lb, positions, marks, tape_status):
     start = e["start_ms"]
     t_lo = start - CFG["window_h"] * H
     checked = e.setdefault("checked", {})
+    if e.get("attr_v") != 2:  # v2 open selection (position carried into the move): re-check found openers once
+        for a, stt in list(checked.items()):
+            if stt in ("opener", "chaser"):
+                del checked[a]
+        e["attr_v"] = 2
     # candidates, in priority order
     cands = [(a, "post_event", True) for a in PRIORITY_CANDIDATES.get(core.underlying(coin), [])]
     tape = tape_rows(coin, t_lo, start)
@@ -812,12 +828,13 @@ def check_opener(a, e, side, t_lo, deep, marks, wrong_way=False):
         return {"status": "no_position"}
     q0 = t_lo - 2 * H
     fr = funding_rows(a, q0, None, pages=3)
-    status, open_h, max_sz = core.open_from_funding(fr, coin, side, t_lo, detect, q0)
+    status, open_h, max_sz = core.open_from_funding(fr, coin, side, t_lo, detect, q0, ref_ms=start)
     if status != "opened":
         return {"status": status if status != "none" else "no_position"}
     # exact first fill: open happened in (open_h - 1h, open_h]
     fills, _ = fills_merged(a, open_h - H - 5 * 60000, open_h + 5 * 60000)
-    f = core.first_open_fill(fills, coin, side, open_h - H - 5 * 60000, open_h + 5 * 60000)
+    f = core.first_open_fill(fills, coin, side, open_h - H - 5 * 60000, min(open_h + 5 * 60000, max(start, open_h - H)), last=True) \
+        or core.first_open_fill(fills, coin, side, open_h - H - 5 * 60000, open_h + 5 * 60000)
     if f is None and any(x.get("coin") == coin and float(x.get("startPosition") or 0) != 0 for x in fills):
         return {"status": "flipped_or_added"}  # position existed (other side or residual) when this hour began
     opened_ms = f["time"] if f else open_h - H
@@ -962,7 +979,7 @@ def seed_cap(w):
     if w["tier"] in ("HIGH", "MEDIUM") and w.get("discovery_source") == "seed" and not (w.get("stats") or {}).get("closes"):
         w["tier"] = "WATCH"
     if w["tier"] == "WATCH" and w["cohort"] == "unproven":
-        w["cohort"] = sd.get("cohort") or "unproven"
+        w["cohort"] = "one_hit"  # backtest-only evidence: never shown as repeat_premove
         w["why"] = list(sd.get("why") or []) or w["why"]
         if (sd.get("premove") or {}).get("hits"):
             pm = sd["premove"]
@@ -1096,7 +1113,7 @@ def make_alerts(actions, reg, marks, state, new_events):
             dedup[f"event3|{eid}"] = NOW_MS
             top = sorted(pre, key=lambda o: -((o.get("upnl") or 0) + (o.get("realized") or 0)))[:5]
             push({"ts": iso(NOW_MS), "ts_ms": NOW_MS, "priority": "MEDIUM", "type": "event", "coin": e["coin"], "side": side,
-                  "title": f"{len(pre)} wallets opened {e['coin']} {side} before the {e['move_pct']:+.1f}% move",
+                  "title": f"Several wallets opened {e['coin']} {side} before the {e['move_pct']:+.1f}% move",
                   "why": [f"{o['address'][:6]}…{o['address'][-4:]} opened {o['lead_h']:.0f}h before at {o['first_px']}, {usd_s(o['notional'])}" for o in top]
                   + ["After-the-fact discovery: these wallets are WATCH tier until they repeat"],
                   "wallets": [{"address": o["address"], "tier": reg.get(o["address"], {}).get("tier"),
@@ -1104,6 +1121,19 @@ def make_alerts(actions, reg, marks, state, new_events):
                   "notional": round(sum(o.get("notional") or 0 for o in pre)), "px": marks.get(e["coin"], {}).get("mark"),
                   "wallet_entry_px": None, "chase_pct": None, "spread_bps": marks.get(e["coin"], {}).get("spread_bps"),
                   "follow_exit_ret": None, "event_id": eid})
+        # keep the still-recent event alert current (title has no count; why/size refresh in place)
+        top = sorted(pre, key=lambda o: -((o.get("upnl") or 0) + (o.get("realized") or 0)))[:5]
+        for al in alerts:
+            if al.get("type") == "event" and al.get("event_id") == eid and al.get("priority") == "MEDIUM" \
+                    and NOW_MS - al["ts_ms"] < 24 * H:
+                al["title"] = f"Several wallets opened {e['coin']} {side} before the {e['move_pct']:+.1f}% move"
+                al["why"] = [f"{o['address'][:6]}…{o['address'][-4:]} opened {o['lead_h']:.0f}h before at {o['first_px']}, "
+                             f"{usd_s(o['notional'])}" for o in top] + [f"{len(pre)} pre-move openers found so far",
+                                                                         "After-the-fact discovery: these wallets are WATCH tier until they repeat"]
+                al["wallets"] = [{"address": o["address"], "tier": reg.get(o["address"], {}).get("tier"),
+                                  "cohort": reg.get(o["address"], {}).get("cohort")} for o in top]
+                al["notional"] = round(sum(o.get("notional") or 0 for o in pre))
+                al["updated_ms"] = NOW_MS
     for k in [k for k, t in dedup.items() if NOW_MS - t > 7 * 86_400_000]:
         del dedup[k]
     state["alerts"] = (out[::-1] + alerts)[:500]
