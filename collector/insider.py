@@ -61,7 +61,7 @@ T0 = time.time()
 NOW_MS = int(T0 * 1000)
 ERRORS: list[str] = []
 NOTES: list[str] = []
-STATS = {"weight": 0, "calls": 0, "poll_ok": 0, "poll_err": 0}
+STATS = {"weight": 0, "calls": 0, "poll_ok": 0, "poll_err": 0, "wallets_polled": 0}
 
 
 def iso(ms):
@@ -231,6 +231,7 @@ def fills_merged(addr, start_ms, end_ms=None, pages=1):
 
 
 def ledger_info(addr):
+    addr = addr.lower()
     rows = hl({"type": "userNonFundingLedgerUpdates", "user": addr, "startTime": 0}, per=20)
     if not rows:
         return {"age_days": None, "funded_by": "unknown", "first_ts": None}
@@ -243,6 +244,12 @@ def ledger_info(addr):
         if t == "deposit":
             funded = "bridge"
             break
+        amt = next((d[k] for k in ("usdc", "amount", "usdcValue") if d.get(k) is not None), None)
+        try:
+            if amt is not None and abs(float(amt)) < CFG["fund_dust_usd"]:
+                continue  # dust sends cannot set funded_by
+        except (TypeError, ValueError):
+            pass
         if t in ("send", "spotTransfer", "internalTransfer", "subAccountTransfer") and (d.get("destination") or "").lower() == addr:
             src = (d.get("user") or "").lower()
             if src and src != addr:
@@ -317,7 +324,8 @@ def leaderboard(state, max_age_min):
 
 def ironflow_top(coin, t0, t1, n=40):
     """Best-effort keyless third-party candidates for the last 24h only. Silent on failure."""
-    if NOW_MS - t0 > 23 * H:
+    t0 = max(int(t0), NOW_MS - int(23.5 * H))  # the service only covers ~24h back
+    if t0 >= t1:
         return []
     try:
         r = S.get("https://api.ironflow.sh/v1/analytics/market-top-wallets",
@@ -374,7 +382,7 @@ def sync_tape():
         if d.is_dir() and d.name < cut:
             shutil.rmtree(d, ignore_errors=True)
     if written:
-        NOTES.append(f"Tape: archived {written} closed hour(s)")
+        NOTES.append(f"Saved {written} hour(s) of large-trade tape")
     status = status or load(TAPE_REPO / "status.json", {})
     cands = load(TAPE_REPO / "candidates.json", {}).get("candidates", [])
     return status, cands
@@ -447,10 +455,11 @@ def merge_seeds(reg, state):
             for o in ev.get("openers", []):
                 if o.get("address") and not o.get("chaser"):
                     w = get_wallet(reg, o["address"], "seed")
+                    w.setdefault("discovery_event", eid)
                     _add_event_hit(w, eid, ev.get("coin"), ev.get("dir"), _ms(ev.get("start_ts")) or 0,
                                    _ms(o.get("opened_ts")), False)
         if n:
-            NOTES.append(f"Merged {n} seed event(s)")
+            NOTES.append(f"Loaded {n} researched event(s) from the backtest")
     if sr:
         rows = sr.get("wallets", sr) if isinstance(sr, dict) else sr
         if isinstance(rows, dict):
@@ -460,10 +469,8 @@ def merge_seeds(reg, state):
             if not a.startswith("0x"):
                 continue
             w = get_wallet(reg, a, "seed")
-            for k in ("labels", "why"):
-                for x in s.get(k) or []:
-                    if x not in w[k]:
-                        w[k].append(x)
+            # Seed (backtest) evidence is descriptive only: kept for display, never used to promote the tier.
+            w["seed"] = {k: s.get(k) for k in ("cohort", "labels", "why", "stats", "premove") if s.get(k) is not None}
             if s.get("premove"):
                 w["seed_premove"] = s["premove"]
             for h in s.get("event_hits") or []:
@@ -531,7 +538,7 @@ def monitor(reg, positions, dexs, marks, state, phase, min_left):
     new_sweeps = 0
     for i, w in enumerate(tracked):
         if left() < min_left:
-            NOTES.append(f"Monitoring {phase} stopped early for time ({i}/{len(tracked)} wallets polled)")
+            NOTES.append(f"Ran out of time this cycle: checked {i} of {len(tracked)} wallets; the rest are checked next cycle")
             break
         a = w["address"]
         first = a not in positions
@@ -539,6 +546,7 @@ def monitor(reg, positions, dexs, marks, state, phase, min_left):
             if new_sweeps >= CFG["new_sweeps_per_cycle"]:
                 continue
             new_sweeps += 1
+        STATS["wallets_polled"] += 1
         full = (w["tier"] == "HIGH" or first or (int(a[2:10], 16) + cyc) % CFG["sweep_every"] == 0)
         want = [""] + (dexs if full else [d for d in w.get("known_dexs", []) if d])
         prev = positions.get(a, {})
@@ -684,8 +692,15 @@ def attribute(eid, state, reg, lb, positions, marks, tape_status):
             cands.append((a, w.get("discovery_source") or "registry", True))
     if lb:
         top = lb["day_top"] if NOW_MS - start < 24 * H else lb["week_top"]
-        for i, a in enumerate(top[: CFG["attr_lb_top"]]):
-            cands.append((a, "post_event", i < CFG["attr_lb_closed_check"]))
+        k = CFG["attr_lb_closed_check"]
+        for i, a in enumerate(top[:k]):
+            cands.append((a, "post_event", True))
+        # day losers (wrong-way candidates) before the long tail of day winners
+        bottom = lb.get("day_bottom", []) if NOW_MS - start < 24 * H else []
+        for a in list(reversed(bottom))[: CFG["attr_lb_bottom"]]:
+            cands.append((a, "wrong_way_check", False))
+        for a in top[k: CFG["attr_lb_top"]]:
+            cands.append((a, "post_event", False))
     for a in ironflow_top(coin, t_lo, start):
         cands.append((a, "post_event", True))
     seen, todo = set(), []
@@ -698,11 +713,11 @@ def attribute(eid, state, reg, lb, positions, marks, tape_status):
     e["pending"] = len(todo)
     n = 0
     for a, src, deep in todo:
-        if n >= CFG["attr_per_cycle"] or left() < 70:
+        if n >= CFG["attr_per_cycle"] or left() < CFG["attr_reserve_s"]:
             break
         n += 1
         try:
-            res = check_opener(a, e, side, t_lo, deep, marks)
+            res = check_opener(a, e, side, t_lo, deep, marks, wrong_way=src == "wrong_way_check")
         except Exception as ex:  # noqa: BLE001
             err(f"attr {a[:8]}", ex)
             continue
@@ -711,7 +726,10 @@ def attribute(eid, state, reg, lb, positions, marks, tape_status):
             o = res["opener"]
             o["source"] = src
             e["openers"] = [x for x in e["openers"] if x["address"] != a] + [o]
-            w = get_wallet(reg, a, src if src != "registry" else "post_event")
+            known = a in reg
+            w = get_wallet(reg, a, src if src not in ("registry", "wrong_way_check") else "post_event")
+            if not known or w.get("discovery_source") == "post_event":
+                w.setdefault("discovery_event", eid)
             _add_event_hit(w, eid, coin, e["dir"], start, _ms(o["opened_ts"]), o["chaser"])
             if o.get("equity"):
                 w["equity"] = w.get("equity") or o["equity"]
@@ -729,10 +747,10 @@ def attribute(eid, state, reg, lb, positions, marks, tape_status):
             e.setdefault("wrong_way", {})[a] = res.get("notional", 0)
     e["pending"] = max(0, len(todo) - n)
     if n:
-        NOTES.append(f"{eid}: checked {n} candidates this cycle, {e['pending']} left")
+        NOTES.append(f"{e.get('coin', eid)} move: looked at {n} more possible early traders, {e['pending']} still to check")
 
 
-def check_opener(a, e, side, t_lo, deep, marks):
+def check_opener(a, e, side, t_lo, deep, marks, wrong_way=False):
     coin, dex = e["coin"], core.dex_of(e["coin"])
     start, detect = e["start_ms"], e.get("detect_ms") or NOW_MS
     st = parse_chs(chs(a, dex), NOW_MS)
@@ -744,6 +762,17 @@ def check_opener(a, e, side, t_lo, deep, marks):
         if s2 == "opened":
             return {"status": "wrong_way", "notional": abs(p["szi"]) * marks.get(coin, {}).get("mark", p["entry"])}
         return {"status": "other_side"}
+    if not p and wrong_way:
+        # losers of the day: did they open the other side from flat before the move (and since closed)?
+        opp = "short" if side == "long" else "long"
+        fr = funding_rows(a, t_lo - 2 * H, None, pages=2)
+        s2, oh, mx = core.open_from_funding(fr, coin, opp, t_lo, start, t_lo - 2 * H)
+        if s2 == "opened":
+            c1 = c1h_cached(coin, t_lo - 8 * H)
+            px = core._px_at(c1, oh) or 0
+            if mx * px >= CFG["opener_min_usd"]:
+                return {"status": "wrong_way", "notional": mx * px}
+        return {"status": "no_position"}
     if not p and not deep:
         return {"status": "no_position"}
     q0 = t_lo - 2 * H
@@ -754,6 +783,8 @@ def check_opener(a, e, side, t_lo, deep, marks):
     # exact first fill: open happened in (open_h - 1h, open_h]
     fills, _ = fills_merged(a, open_h - H - 5 * 60000, open_h + 5 * 60000)
     f = core.first_open_fill(fills, coin, side, open_h - H - 5 * 60000, open_h + 5 * 60000)
+    if f is None and any(x.get("coin") == coin and float(x.get("startPosition") or 0) != 0 for x in fills):
+        return {"status": "flipped_or_added"}  # position existed (other side or residual) when this hour began
     opened_ms = f["time"] if f else open_h - H
     first_px = float(f["px"]) if f else (p["entry"] if p else None)
     mark = marks.get(coin, {}).get("mark")
@@ -771,7 +802,7 @@ def check_opener(a, e, side, t_lo, deep, marks):
     if ntl < CFG["opener_min_usd"]:
         return {"status": "small"}
     c1 = c1h_cached(coin, t_lo - 8 * H)
-    pre = core.pre_open_move(c1, opened_ms, e["dir"])
+    pre = core.pre_open_move(c1, opened_ms, e["dir"], open_px=first_px if f else None)
     chaser = core.is_chaser(opened_ms, start, pre, e.get("move_pct"))
     eq = equity_of(a, [st["av"]] + ([] if dex == "" else []))
     if dex:
@@ -796,7 +827,7 @@ def enrich(reg, lb, state):
                                                  w.get("enriched_ms", 0)))
     done = 0
     for w in order:
-        if left() < 60:
+        if left() < 20:
             break
         a = w["address"]
         try:
@@ -885,6 +916,26 @@ def base_rate(reg):
         hits += sum(1 for o in sc if o["score"]["hit"])
     p0 = hits / n if n >= CFG["p0_min_n"] else CFG["p0_default"]
     return max(p0, CFG["p0_floor"]), tested, n
+
+
+def seed_cap(w):
+    """Wallets that came from the backtest seed stay WATCH unless our own live measurements say otherwise.
+    Seed stats never promote; a NOISE verdict from our own measurements (vault, maker, hedge) is kept."""
+    sd = w.get("seed")
+    if not sd:
+        return
+    if w["tier"] in ("HIGH", "MEDIUM") and w.get("discovery_source") == "seed" and not (w.get("stats") or {}).get("closes"):
+        w["tier"] = "WATCH"
+    if w["tier"] == "WATCH" and w["cohort"] == "unproven":
+        w["cohort"] = sd.get("cohort") or "unproven"
+        w["why"] = list(sd.get("why") or []) or w["why"]
+        if (sd.get("premove") or {}).get("hits"):
+            pm = sd["premove"]
+            w["why"].insert(0, f"Backtest: {pm['hits']} pre-move hits on {pm.get('opens_scored')} scored opens "
+                               f"(hit rate {pm.get('hit_rate', 0)*100:.0f}%); not validated live")
+    for x in sd.get("labels") or []:
+        if x not in w["labels"]:
+            w["labels"].append(x)
 
 
 def labels_for(w, prem, events):
@@ -1061,6 +1112,9 @@ METHOD = [
     "Tiers: post-event discovery can never exceed WATCH. HIGH needs >= 3 independent pre-move hits AND >= 6 independent large fresh "
     "opens whose hit rate beats the base rate with a binomial p <= 0.003 and expected false positives < 0.5 across all wallets tested, "
     "positive mean 24h return across hits and misses, median hold >= 1.5h, and no hedge. An empty HIGH list is expected early on.",
+    "Base rate: in a backtest of 440 sampled leaderboard wallets, large fresh opens preceded a big move 8.4% of the time versus 8.2% "
+    "for random timing, and no wallet reached HIGH. That 8.4% is the chance rate (floor 8%) until 50+ opens are scored live. "
+    "Wallets loaded from that backtest are shown as WATCH; backtest numbers never raise a tier.",
     "A scored large fresh open = opened from flat, peak size within 6h >= max($250k, 5% of equity). Hit = price touched +X in its "
     "direction before -X within 48h, X = max(2%, 1 daily sigma x sqrt(2)). Same-direction opens within 24h count as one trial.",
     "MEDIUM (proven speculator) is a 90-day after-fee track record (20+ closes, win rate 55%+, PF 1.3+, 90d PnL > 0, equity $250k+). "
@@ -1070,7 +1124,7 @@ METHOD = [
     "Alerts compare each tracked wallet's positions on every dex with the previous cycle. A wallet's first observation never alerts; "
     "a failed dex poll carries the prior state forward. HIGH alerts are downgraded when price already moved more than max(2%, 0.75 x 1h sigma) "
     "from the wallet's entry. Wallets funded by the same counterparty are grouped as one entity for de-dup and clusters.",
-    "Scorecard is strictly prospective: forward returns from the mark price at alert time (what a copy-trader could get), at 1h/4h/24h/72h. "
+    "Scorecard is strictly prospective: forward returns at 1h/4h/24h/72h measured from the mark price when the alert was logged, before spread, fees, funding and delay. "
     "net_h24 subtracts a 0.09% round-trip fee and the quoted spread. Nothing here proves anyone traded on inside information.",
 ]
 
@@ -1142,7 +1196,7 @@ def build_tab(state, reg, tape_status, dexs, marks, poll_degraded, n_tested):
                    "dexs": len(dexs) + 1, "wallets_tracked": sum(1 for w in reg.values() if w["tier"] != "NOISE"),
                    "wallets_registry": len(reg), "discord": "configured" if hook else "logging_only",
                    "poll_degraded": poll_degraded, "n_wallets_tested": n_tested,
-                   "weight_used": STATS["weight"], "runtime_s": round(time.time() - T0, 1), "notes": NOTES[-12:]},
+                   "weight_used": STATS["weight"], "wallets_polled": STATS["wallets_polled"], "runtime_s": round(time.time() - T0, 1), "notes": NOTES[-12:]},
         "alerts": state["alerts"][: CFG["keep_alerts"]],
         "events": evs,
         "wallets": wallets[:300],
@@ -1161,6 +1215,9 @@ def main():
     state["cycle"] = state.get("cycle", 0) + 1
     reg = load(IND / "wallets.json", {})
     positions = load(IND / "positions.json", {})
+    for w in reg.values():  # migration: wallets found by attribution before discovery_event existed
+        if w.get("discovery_source") in ("post_event", "seed") and not w.get("discovery_event") and w.get("event_hits"):
+            w["discovery_event"] = min(w["event_hits"], key=lambda h: h.get("start_ms") or 0)["event_id"]
     dexs, marks, tape_status, poll_degraded, n_tested, new_events = [], {}, {}, True, 0, []
     try:
         tape_status, tape_cands = sync_tape()
@@ -1178,7 +1235,7 @@ def main():
                 break
             attribute(eid, state, reg, lb, positions, marks, tape_status)
         if marks:
-            actions += monitor(reg, positions, dexs, marks, state, "B", 60)
+            actions += monitor(reg, positions, dexs, marks, state, "B", 45)
         tot = STATS["poll_ok"] + STATS["poll_err"]
         poll_degraded = (not marks) or (tot > 0 and STATS["poll_err"] / tot > 0.2)
         state["actions"] = [a for a in state.get("actions", []) if NOW_MS - a["ts"] < 24 * H] + actions
@@ -1194,11 +1251,16 @@ def main():
             w["tier"], w["cohort"], w["why"] = core.assign_tier(w, prem)
             w["score"] = core.wallet_score(w, prem)
             w["labels"] = labels_for(w, prem, state["events"])
-        NOTES.append(f"Base rate p0={p0:.2f} from {n_opens} scored opens across {n_tested} wallets")
+            seed_cap(w)
+        if n_opens >= CFG["p0_min_n"]:
+            NOTES.append(f"Chance rate for a big move after a large open: {p0*100:.1f}%, measured from {n_opens} live-scored opens")
+        else:
+            NOTES.append(f"Chance rate for a big move after a large open: {p0*100:.1f}% (backtest of 440 leaderboard wallets; "
+                         f"only {n_opens} live-scored opens so far)")
         if not poll_degraded:
             make_alerts(actions, reg, marks, state, new_events)
         else:
-            NOTES.append("Alerts suppressed this cycle: position polls degraded")
+            NOTES.append("No alerts this cycle: too many position checks failed, so changes could not be trusted")
     except Exception as e:  # noqa: BLE001
         err("cycle", e)
         traceback.print_exc()

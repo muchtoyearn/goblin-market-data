@@ -26,7 +26,13 @@ STATE = ROOT / "data" / "insider" / "state.json"
 TAB = ROOT / "data" / "tabs" / "insider.json"
 STALE_MIN = 15
 MAX_AGE_MIN = 30
-DASH = "https://goblin-alpha.pplx.app/#/"
+def _atomic(p, obj):
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, separators=(",", ":")))
+    os.replace(tmp, p)
+
+
+DASH = "https://goblin-alpha.pplx.app/#/insider"
 CAVEAT = ("Copying is a bet that this wallet's past timing repeats. It may be hedged elsewhere, "
           "and past hits can be luck. Paper-track before sizing.")
 
@@ -132,12 +138,12 @@ def main():
     if not changed:
         print(f"insider_alert: nothing new ({'live' if discord or slack else 'logging-only'})")
         return
-    STATE.write_text(json.dumps(state, separators=(",", ":")))
+    _atomic(STATE, state)
     for a in tab.get("alerts", []):
         if a.get("id") in changed:
             a["delivered"] = changed[a["id"]].get("delivered", False)
             a["logged"] = changed[a["id"]].get("logged", False)
-    TAB.write_text(json.dumps(tab, separators=(",", ":")))
+    _atomic(TAB, tab)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,9 @@ CFG = {
     "chaser_min_pct": 3.0,
     "chaser_frac": 0.30,
     "attr_per_cycle": 40,            # position checks per event per cycle
+    "attr_lb_bottom": 50,            # day-leaderboard losers checked for wrong-way opens
+    "attr_reserve_s": 110,           # stop attribution with this much budget left so monitoring B still runs
+    "fund_dust_usd": 100,            # transfers below this cannot set funded_by
     "attr_lb_top": 120,              # leaderboard day/week PnL toppers checked per event
     "attr_lb_closed_check": 30,      # of those, funding-check the top N even without an open position
     "attr_tape_min_usd": 100_000,    # tape net notional in the move direction to become a candidate
@@ -45,7 +48,7 @@ CFG = {
     "decluster_h": 24,               # same-direction opens within 24h = one independent trial
     "event_indep_h": 48,             # event hits must be >= 48h apart to be independent
     "p0_floor": 0.08,
-    "p0_default": 0.30,              # used until enough opens are scored across wallets
+    "p0_default": 0.084,             # backtest: 440 leaderboard wallets, large fresh opens hit 8.4% (random timing 8.2%)
     "p0_min_n": 50,
     "high": {"indep_hits": 3, "indep_opens": 6, "p_val": 0.003, "expected_fp": 0.5, "min_hold_h": 1.5},
     "medium": {"closes": 20, "win_rate": 0.55, "profit_factor": 1.3, "pnl_90d": 0, "equity": 250_000, "min_hold_h": 1.0},
@@ -178,16 +181,24 @@ def classify_event(move, mark, sigma_d, cfg=CFG):
     return {"move_pct": round(pct, 2), "sigma": round(sig, 2)}
 
 
-def pre_open_move(c1h, open_ms, direction, cfg=CFG):
-    """Signed % move in the event direction over the chaser_prior_h hours before open_ms."""
+def _px_at(c1h, ts):
+    """Last price known at ts without look-ahead: close of the last fully closed hour, else open of the current hour."""
+    at = [x for x in c1h if x["t"] <= ts]
+    if not at:
+        return None
+    x = at[-1]
+    return x["c"] if x["t"] + H <= ts else x["o"]
+
+
+def pre_open_move(c1h, open_ms, direction, cfg=CFG, open_px=None):
+    """Signed % move in the event direction over the chaser_prior_h hours before open_ms.
+    Uses the wallet's own first fill price when known (no intra-hour look-ahead)."""
     sign = 1 if direction in ("up", "long") else -1
     t0 = open_ms - cfg["chaser_prior_h"] * H
-    before = [x for x in c1h if x["t"] <= t0]
-    at = [x for x in c1h if x["t"] <= open_ms]
-    if not before or not at:
+    p0 = _px_at(c1h, t0)
+    p1 = open_px or _px_at(c1h, open_ms)
+    if not p0 or not p1:
         return None
-    p0 = before[-1]["c"]
-    p1 = at[-1]["c"]
     return round(sign * (p1 / p0 - 1) * 100, 2)
 
 
@@ -236,7 +247,9 @@ def open_from_funding(entries, coin, side, t_lo, t_hi, q_start):
         if sgn(sz) != want:
             continue
         prev = hours.get(h - 1)
-        fresh = prev is None or sgn(prev) != want
+        if prev is not None and sgn(prev) == -want:
+            continue  # a flip is not an open from flat
+        fresh = prev is None or prev == 0
         if not fresh:
             continue
         if e["time"] - H < q_start + H:  # held at the very start of the query: pre-dates the window
@@ -394,9 +407,11 @@ def premove_block(w, p0, n_tested, cfg=CFG):
     fwd = [o["score"]["fwd_24h"] for o in scored if o["score"].get("fwd_24h") is not None]
     p_val = binom_tail(h, n, p0) if n else None
     ev_hits = [x for x in w.get("event_hits", []) if not x.get("chaser")]
+    # the event that got the wallet discovered is a selected sample: it does not count toward HIGH
+    indep = [x for x in ev_hits if x.get("event_id") != w.get("discovery_event")]
     return {
         "hits": len(ev_hits),
-        "independent_hits": independent_event_hits(ev_hits, cfg),
+        "independent_hits": independent_event_hits(indep, cfg),
         "opens_scored": len(scored),
         "independent_opens": n,
         "independent_open_hits": h,
@@ -446,8 +461,9 @@ def assign_tier(w, prem, cfg=CFG):
     if w.get("hedge"):
         return "NOISE", "hedger_mm", [f"Offset position: {w['hedge']}"]
 
+    post = w.get("discovery_source") in ("post_event", "seed") and not prem.get("live_opens")
     hi = cfg["high"]
-    if (prem["independent_hits"] >= hi["indep_hits"] and prem["independent_opens"] >= hi["indep_opens"]
+    if not post and (prem["independent_hits"] >= hi["indep_hits"] and prem["independent_opens"] >= hi["indep_opens"]
             and prem["p_val"] is not None and prem["p_val"] <= hi["p_val"]
             and prem["expected_fp"] is not None and prem["expected_fp"] < hi["expected_fp"]
             and (prem["avg_fwd_24h"] or 0) > 0 and hold is not None and hold >= hi["min_hold_h"]):
@@ -469,6 +485,9 @@ def assign_tier(w, prem, cfg=CFG):
                    + (f", open uPnL {'-' if open_upnl < 0 else ''}{usd(open_upnl)}" if open_upnl else ""))
         if prem["hits"]:
             why.append(f"MEDIUM+ : {prem['hits']} pre-move hit(s), not enough for HIGH")
+        if post:
+            why.append("Found after a move (or from the backtest): stays WATCH until it makes a large open we see live")
+            return "WATCH", "proven_speculator", why
         if hold is None or st.get("truncated") or st.get("provisional"):
             why.append("Provisional: hold time not measured from a complete fill history, so WATCH until it is")
             return "WATCH", "proven_speculator", why
@@ -633,8 +652,8 @@ def fill_outcomes(alert, now_ms, mark, cfg=CFG, hist_px=None):
     mark: current mark (used if the horizon came due within outcome_live_tol_min);
     hist_px: optional fn(due_ms) -> price for late fills.
     """
-    if not alert.get("px") or alert.get("side") not in ("long", "short"):
-        return alert
+    if not alert.get("px") or alert.get("side") not in ("long", "short") or alert.get("type") == "tracked_close":
+        return alert  # exits are judged by follow_exit_ret on the opening alert, not as directional calls
     sign = 1 if alert["side"] == "long" else -1
     oc = alert.setdefault("outcome", {k: None for k in cfg["horizons"]})
     for k, h in cfg["horizons"].items():
@@ -656,18 +675,18 @@ def fill_outcomes(alert, now_ms, mark, cfg=CFG, hist_px=None):
 
 
 def scorecard(alerts, cfg=CFG):
-    live = [a for a in alerts if a.get("type") != "event" and a.get("side")]
+    live = [a for a in alerts if a.get("type") not in ("event", "tracked_close") and a.get("side")]
 
     def block(xs):
         sc = [a for a in xs if (a.get("outcome") or {}).get("h24") is not None]
-        return {"n": len(xs), "scored": len(sc),
+        return {"n": len(sc), "alerts": len(xs), "scored": len(sc),
                 "hit_rate_24h": round(sum(1 for a in sc if a["outcome"]["h24"] > 0) / len(sc), 3) if sc else None,
                 "avg_fwd_24h": round(sum(a["outcome"]["h24"] for a in sc) / len(sc), 2) if sc else None}
 
     allb = block(live)
-    return {"n_alerts": allb["n"], "n_scored": allb["scored"], "hit_rate_24h": allb["hit_rate_24h"],
+    return {"n_alerts": allb["alerts"], "n_scored": allb["scored"], "hit_rate_24h": allb["hit_rate_24h"],
             "avg_fwd_24h": allb["avg_fwd_24h"],
             "by_priority": {p: {k: v for k, v in block([a for a in live if a["priority"] == p]).items() if k != "scored"}
                             for p in ("HIGH", "MEDIUM", "INFO")},
-            "note": "Strictly prospective: only alerts emitted live by this collector, measured from the mark price at "
-                    "alert time (what a copy-trader could get). Event alerts are excluded. Small samples mean nothing yet."}
+            "note": "Strictly prospective: only alerts emitted live by this collector, measured from the mark price when the "
+                    "alert was logged, before spread, fees, funding and delay. Event alerts are excluded. Small samples mean nothing yet."}

@@ -236,3 +236,61 @@ def test_outcomes_from_alert_mark_and_scorecard():
     assert a["outcome"]["h24"] == 5.0 and a["net_h24"] == round(5.0 - 0.09 - 0.1, 2)
     sc = core.scorecard([a, {"type": "event", "priority": "INFO", "side": "long", "outcome": {"h24": -9}}])
     assert sc["n_alerts"] == 1 and sc["hit_rate_24h"] == 1.0  # fraction 0..1
+
+
+def test_seed_registry_stays_watch(tmp_path, monkeypatch):
+    import insider
+    monkeypatch.setattr(insider, "IND", tmp_path)
+    import json
+    (tmp_path / "seed_registry.json").write_text(json.dumps({"generated": "x", "method": 6, "wallets": [{
+        "address": "0xAA44894F7C04C77FCF2807576834B93F6A8CB844", "tier": "HIGH", "cohort": "repeat_premove",
+        "labels": ["Hit BTC 2026-11-19"], "why": ["4 hits on 36 scored regular-fill starts"],
+        "stats": {"closes": 52, "win_rate": 0.73, "profit_factor": 1.67, "pnl_90d": 5e6},
+        "premove": {"hits": 4, "opens_scored": 36, "hit_rate": 0.111, "avg_fwd_24h": 0.117}}]}))
+    reg, state = {}, {"events": {}}
+    insider.merge_seeds(reg, state)
+    w = reg["0xaa44894f7c04c77fcf2807576834b93f6a8cb844"]
+    assert not (w.get("stats") or {}).get("closes")          # seed stats are not adopted as measured stats
+    p0, n_tested, _ = insider.base_rate(reg)
+    assert abs(p0 - 0.084) < 1e-9
+    prem = core.premove_block(w, p0, n_tested)
+    w["tier"], w["cohort"], w["why"] = core.assign_tier(w, prem)
+    w["labels"] = insider.labels_for(w, prem, state["events"])
+    insider.seed_cap(w)
+    assert w["tier"] == "WATCH" and w["cohort"] == "repeat_premove"
+    assert "Hit BTC 2026-11-19" in w["labels"] and w["why"][0].startswith("Backtest: 4 pre-move hits")
+
+
+def test_flip_is_not_open_from_flat():
+    H = core.H
+    rows = [{"coin": "xyz:NVDA", "time": 10 * H, "szi": "-100"}, {"coin": "xyz:NVDA", "time": 11 * H, "szi": "100"}]
+    st, _, _ = core.open_from_funding(rows, "xyz:NVDA", "long", 5 * H, 20 * H, 0)
+    assert st == "none"
+
+
+def test_pre_open_move_no_lookahead():
+    H = core.H
+    c1h = [{"t": 0, "o": 100, "c": 100}, {"t": H, "o": 100, "c": 100}, {"t": 2 * H, "o": 100, "c": 120}]
+    # opened 5 min into the hour whose close is +20%: must not see that close
+    assert core.pre_open_move(c1h, 2 * H + 300_000, "up", cfg=dict(core.CFG, chaser_prior_h=2)) == 0.0
+
+
+def test_scorecard_excludes_closes_and_counts_scored():
+    al = [{"type": "tracked_open", "side": "long", "priority": "MEDIUM", "outcome": {"h24": 3.0}},
+          {"type": "tracked_open", "side": "long", "priority": "MEDIUM", "outcome": {"h24": None}},
+          {"type": "tracked_close", "side": "long", "priority": "MEDIUM", "outcome": {"h24": -10.0}}]
+    sc = core.scorecard(al)
+    assert sc["n_alerts"] == 2 and sc["n_scored"] == 1
+    assert sc["by_priority"]["MEDIUM"]["n"] == 1 and sc["by_priority"]["MEDIUM"]["alerts"] == 2
+
+
+def test_post_event_capped_and_discovery_hit_excluded():
+    H = core.H
+    w = {"discovery_source": "post_event", "discovery_event": "e0",
+         "stats": {"closes": 40, "win_rate": 0.7, "profit_factor": 3, "pnl_90d": 5e6, "median_hold_h": 10},
+         "equity": 5e6, "positions": [], "opens": [],
+         "event_hits": [{"event_id": f"e{i}", "start_ms": i * 72 * H} for i in range(3)]}
+    prem = core.premove_block(w, 0.084, 10)
+    assert prem["independent_hits"] == 2
+    tier, cohort, _ = core.assign_tier(w, prem)
+    assert tier == "WATCH"
