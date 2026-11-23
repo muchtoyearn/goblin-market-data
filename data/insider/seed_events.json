@@ -1,0 +1,17 @@
+{
+  "note": "Hand-verified context for events. The collector only fills fields that are empty on its own event with the same id.",
+  "events": [
+    {
+      "id": "xyz:NVDA|2026-11-23",
+      "coin": "xyz:NVDA",
+      "dir": "up",
+      "start_ts": "2026-11-23T13:55:00Z",
+      "headline": "NVIDIA board reinstated Jensen Huang as CEO (press release about 8:55 am ET, Nov 23). A return had been publicly discussed for a week, and President Trump posted in favour of it on Sunday night, about 11 hours earlier.",
+      "headline_url": "https://nvidianews.nvidia.com/news/nvidia-board-reinstates-jensen-huang-as-president-ceo-and-board-director",
+      "wrong_way_openers_n": 20,
+      "wrong_way_notional": 25440000,
+      "wrong_way_note": "Lower bound from a one-off check covering only the last 21 hours before the news: at least 20 wallets opened shorts of $250k or more from flat.",
+      "openers": []
+    }
+  ]
+}

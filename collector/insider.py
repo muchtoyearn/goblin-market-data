@@ -475,6 +475,9 @@ def merge_seeds(reg, state):
                 ev = dict(ev, seed=True, checked=ev.get("checked", {}))
                 ev.setdefault("start_ms", _ms(ev.get("start_ts")))
                 ev.setdefault("detect_ms", _ms(ev.get("detect_ts")) or ev.get("start_ms"))
+                for k in ("wrong_way_openers_n", "wrong_way_notional"):
+                    if ev.get(k):
+                        ev["seed_" + k] = ev[k]
                 state["events"][eid] = ev
                 n += 1
             else:
@@ -490,6 +493,10 @@ def merge_seeds(reg, state):
                 for k in ("headline", "caveat", "wrong_way_openers_n", "wrong_way_notional"):
                     if ev.get(k) and not cur.get(k):
                         cur[k] = ev[k]
+                # hand-verified lower bounds: the live count may still be draining its queue
+                for k in ("wrong_way_openers_n", "wrong_way_notional"):
+                    if ev.get(k):
+                        cur["seed_" + k] = ev[k]
             for o in ev.get("openers", []):
                 if o.get("address") and not o.get("chaser"):
                     w = get_wallet(reg, o["address"], "seed")
@@ -1235,6 +1242,8 @@ def build_tab(state, reg, tape_status, dexs, marks, poll_degraded, n_tested):
         ww = e.get("wrong_way") or {}
         ww_n = len(ww) if ww else e.get("wrong_way_openers_n")
         ww_usd = round(sum(ww.values())) if ww else e.get("wrong_way_notional")
+        if e.get("seed_wrong_way_openers_n") and (ww_n or 0) < e["seed_wrong_way_openers_n"]:
+            ww_n, ww_usd = e["seed_wrong_way_openers_n"], e.get("seed_wrong_way_notional") or ww_usd
         evs.append({"id": e["id"], "coin": e["coin"], "dir": e["dir"], "move_pct": e.get("move_pct"), "sigma": e.get("sigma"),
                     "start_ts": iso(e.get("start_ms")), "detect_ts": iso(e.get("detect_ms")), "ref_px": e.get("ref_px"),
                     "px": marks.get(e["coin"], {}).get("mark", e.get("px")), "headline": e.get("headline"),
