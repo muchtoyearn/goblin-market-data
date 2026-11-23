@@ -26,10 +26,16 @@ jobs:
       - name: Collect every 10 minutes
         env:
           DISCORD_SPOTFLOW_WEBHOOK: ${{ secrets.DISCORD_SPOTFLOW_WEBHOOK }}
+          DISCORD_INSIDER_WEBHOOK: ${{ secrets.DISCORD_INSIDER_WEBHOOK }}
+          SLACK_INSIDER_WEBHOOK: ${{ secrets.SLACK_INSIDER_WEBHOOK }}
+          INSIDER_TAPE_DIR: /tmp/goblin_tape
+          INSIDER_WEIGHT_PER_MIN: "700"
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           end=$(( $(date +%s) + 340*60 ))
+          # trade tape: background websocket listener for the life of the loop (writes to /tmp, outside git)
+          ( timeout $(( 340*60 + 120 )) python collector/tape.py --until "$end" --out "$INSIDER_TAPE_DIR" > /tmp/tape.log 2>&1 || echo "tape exited" ) &
           while [ "$(date +%s)" -lt "$end" ]; do
             start=$(date +%s)
             git rebase --abort 2>/dev/null || true
@@ -38,6 +44,9 @@ jobs:
             timeout 600 python collector/tabs.py || echo "tabs failed"
             timeout 420 python collector/spotflow.py || echo "spotflow failed"
             timeout 60 python collector/spotflow_alert.py || echo "spotflow alert failed"
+            timeout 300 python collector/insider.py || echo "insider failed"
+            timeout 60 python collector/insider_alert.py || echo "insider alert failed"
+            tail -n 3 /tmp/tape.log 2>/dev/null || true
             git add data/
             if ! git diff --cached --quiet; then
               git commit -m "data: snapshot $(date -u +%FT%TZ)" -q
