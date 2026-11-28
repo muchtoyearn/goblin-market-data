@@ -1,8 +1,8 @@
 {
  "confirmed_label": "Bearish flow",
  "confirmed_at": "2026-11-20T18:07:19.699129+00:00",
- "pending_label": null,
- "pending_runs": 0,
+ "pending_label": "Leaning bearish",
+ "pending_runs": 1,
  "last_alert": {
   "Bearish flow": "2026-11-20T18:07:19.699129+00:00"
  },
